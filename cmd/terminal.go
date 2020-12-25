@@ -16,6 +16,7 @@ package cmd
 import (
 	"bufio"
 	"crypto/tls"
+	"encoding/gob"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -55,6 +56,13 @@ const (
 	httpProtocol  = "http"
 	wssProtocol   = "wss"
 	wsProtocol    = "ws"
+
+	recordingTerminalOutput = 1
+	recordingUserInput      = 2
+	playbackSleep           = time.Millisecond * 32
+
+	argRecord   = "record"
+	argPlayback = "playback"
 )
 
 var terminalCmd = &cobra.Command{
@@ -68,6 +76,11 @@ var terminalCmd = &cobra.Command{
 	},
 }
 
+func init() {
+	terminalCmd.Flags().StringP(argRecord, "", "", "recording file path to save the session to")
+	terminalCmd.Flags().StringP(argPlayback, "", "", "recording file path to playback the session from")
+}
+
 func getWebSocketScheme(scheme string) string {
 	if scheme == httpsProtocol {
 		scheme = wssProtocol
@@ -79,12 +92,17 @@ func getWebSocketScheme(scheme string) string {
 
 // TerminalCmd handles the terminal command
 type TerminalCmd struct {
-	server     string
-	skipVerify bool
-	deviceID   string
-	sessionID  string
-	running    bool
-	stop       chan bool
+	server             string
+	recordFile         string
+	playbackFile       string
+	skipVerify         bool
+	deviceID           string
+	sessionID          string
+	running            bool
+	stop               chan bool
+	stopRecording      chan bool
+	userInputChan      chan []byte
+	terminalOutputChan chan []byte
 }
 
 // NewTerminalCmd returns a new TerminalCmd
@@ -99,17 +117,77 @@ func NewTerminalCmd(cmd *cobra.Command, args []string) (*TerminalCmd, error) {
 		return nil, err
 	}
 
+	recordFile, err := cmd.Flags().GetString(argRecord)
+	if err != nil {
+		return nil, err
+	}
+
+	playbackFile, err := cmd.Flags().GetString(argPlayback)
+	if err != nil {
+		return nil, err
+	}
+
 	return &TerminalCmd{
-		server:     server,
-		skipVerify: skipVerify,
-		deviceID:   args[0],
-		stop:       make(chan bool),
+		server:             server,
+		recordFile:         recordFile,
+		playbackFile:       playbackFile,
+		skipVerify:         skipVerify,
+		deviceID:           args[0],
+		stop:               make(chan bool),
+		stopRecording:      make(chan bool),
+		userInputChan:      make(chan []byte),
+		terminalOutputChan: make(chan []byte),
 	}, nil
+}
+
+type TerminalRecordingData struct {
+	Type int32
+	Data []byte
+}
+
+func (c *TerminalCmd) record() {
+	f, err := os.Create(c.recordFile)
+	if err != nil {
+		log.Err(fmt.Sprintf("Can't create recording file: %s: %s", c.recordFile, err.Error()))
+	}
+
+	defer f.Close()
+	log.Info(fmt.Sprintf("Recording to file: %s", c.recordFile))
+
+	e := gob.NewEncoder(f)
+	for {
+		select {
+		case <-c.stopRecording:
+			log.Info("Stopping recording loop.")
+			return
+		case terminalOutput := <-c.terminalOutputChan:
+			o := TerminalRecordingData{
+				Type: recordingTerminalOutput,
+				Data: terminalOutput,
+			}
+			e.Encode(o)
+		case userInput := <-c.userInputChan:
+			o := TerminalRecordingData{
+				Type: recordingUserInput,
+				Data: userInput,
+			}
+			e.Encode(o)
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 // Run executes the command
 func (c *TerminalCmd) Run() error {
 	log.Info(fmt.Sprintf("Connecting to the remote terminal of the device %s...", c.deviceID))
+
+	if _, err := os.Stat(c.recordFile); os.IsNotExist(err) {
+		if len(c.recordFile) > 0 {
+			go c.record()
+		}
+	} else {
+		log.Err(fmt.Sprintf("Can't create recording file: %s exisits, will not overwrite, refused to record.", c.recordFile))
+	}
 
 	tokenPath, err := getDefaultAuthTokenPath()
 	if err != nil {
@@ -266,10 +344,17 @@ func (c *TerminalCmd) Run() error {
 
 func (c *TerminalCmd) Stop() {
 	c.stop <- true
+	c.stopRecording <- true
 	c.running = false
 }
 
 func (c *TerminalCmd) pipeStdout(conn *websocket.Conn, r io.Reader) {
+	if len(c.playbackFile) > 0 {
+		for c.running {
+
+		}
+		return
+	}
 	s := bufio.NewReader(r)
 	for c.running {
 		raw := make([]byte, 1024)
@@ -301,12 +386,40 @@ func (c *TerminalCmd) pipeStdout(conn *websocket.Conn, r io.Reader) {
 			break
 		}
 
+		c.userInputChan <- m.Body
+
 		_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
 		_ = conn.WriteMessage(websocket.BinaryMessage, data)
 	}
 }
 
 func (c *TerminalCmd) pipeStdin(conn *websocket.Conn, w io.Writer) {
+	if len(c.playbackFile) > 0 {
+		f, err := os.Open(c.playbackFile)
+		if err != nil {
+			log.Err(fmt.Sprintf("Can't open %s: %v", c.playbackFile, err))
+			c.stop <- true
+			return
+		}
+
+		log.Info(fmt.Sprintf("Playing back: %s", c.playbackFile))
+		defer f.Close()
+		d := gob.NewDecoder(f)
+		for c.running {
+			var o TerminalRecordingData
+			err = d.Decode(&o)
+			if err != nil {
+				log.Info(fmt.Sprintf("Finishing playback: %v", err))
+				break
+			}
+			if o.Type == recordingTerminalOutput {
+				w.Write(o.Data)
+			}
+			time.Sleep(playbackSleep)
+		}
+		c.stop <- true
+		return
+	}
 	for c.running {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
@@ -326,6 +439,7 @@ func (c *TerminalCmd) pipeStdin(conn *websocket.Conn, w io.Writer) {
 			if _, err := w.Write(m.Body); err != nil {
 				break
 			}
+			c.terminalOutputChan <- m.Body
 		} else if m.Header.Proto == ws.ProtoTypeShell && m.Header.MsgType == wsshell.MessageTypeSpawnShell {
 			c.sessionID = string(m.Header.SessionID)
 		}
