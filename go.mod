@@ -2,6 +2,8 @@ module github.com/mendersoftware/mender-cli
 
 go 1.14
 
+replace github.com/mendersoftware/go-lib-micro => ../go-lib-micro
+
 require (
 	github.com/cheggaaa/pb/v3 v3.0.5
 	github.com/gorilla/websocket v1.4.2

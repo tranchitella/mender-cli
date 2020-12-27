@@ -83,4 +83,5 @@ func init() {
 	rootCmd.AddCommand(loginCmd)
 	rootCmd.AddCommand(artifactsCmd)
 	rootCmd.AddCommand(terminalCmd)
+	rootCmd.AddCommand(fileTransferCmd)
 }

@@ -38,9 +38,10 @@ github.com/mattn/go-colorable
 github.com/mattn/go-isatty
 # github.com/mattn/go-runewidth v0.0.7
 github.com/mattn/go-runewidth
-# github.com/mendersoftware/go-lib-micro v0.0.0-20201224104551-c32e5b82c3d4
+# github.com/mendersoftware/go-lib-micro v0.0.0-20201224104551-c32e5b82c3d4 => ../go-lib-micro
 ## explicit
 github.com/mendersoftware/go-lib-micro/ws
+github.com/mendersoftware/go-lib-micro/ws/filetransfer
 github.com/mendersoftware/go-lib-micro/ws/shell
 # github.com/mitchellh/mapstructure v1.1.2
 github.com/mitchellh/mapstructure
@@ -106,3 +107,4 @@ gopkg.in/ini.v1
 gopkg.in/yaml.v2
 # gopkg.in/yaml.v3 v3.0.0-20200615113413-eeeca48fe776
 ## explicit
+# github.com/mendersoftware/go-lib-micro => ../go-lib-micro
